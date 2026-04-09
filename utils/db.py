@@ -245,11 +245,28 @@ def atualizar_projeto(pid, nome, descricao, status, unidade="", departamento="",
 
 
 def atualizar_responsavel(rid, nome, email, capacidade):
+    nome = nome.strip()
     with cursor() as cur:
+        # Busca nome atual para propagar em cascata
+        cur.execute("SELECT nome FROM responsaveis WHERE id=%s", (rid,))
+        row = cur.fetchone()
+        nome_antigo = row["nome"] if row else None
+
         cur.execute(
             "UPDATE responsaveis SET nome=%s, email=%s, capacidade_semanal=%s WHERE id=%s",
-            (nome.strip(), email.strip(), int(capacidade), rid),
+            (nome, email.strip(), int(capacidade), rid),
         )
+
+        # Propaga nome novo para atividades e férias
+        if nome_antigo and nome_antigo != nome:
+            cur.execute(
+                "UPDATE atividades SET responsavel=%s WHERE responsavel=%s",
+                (nome, nome_antigo),
+            )
+            cur.execute(
+                "UPDATE ferias SET responsavel=%s WHERE responsavel=%s",
+                (nome, nome_antigo),
+            )
     _clear_cache()
 
 

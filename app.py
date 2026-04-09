@@ -993,6 +993,11 @@ NEON_DATABASE_URL = "postgresql://user:pass@host/neondb?sslmode=require"
                                                 try:
                                                     _db.atualizar_responsavel(r["id"], er_nome, er_email, er_cap)
                                                     st.session_state.edit_resp = None
+                                                    # Força recarga completa: nome pode ter mudado
+                                                    # em atividades, férias e capacidade
+                                                    st.session_state.df = None
+                                                    st.session_state.capacidade = {}
+                                                    st.session_state.ferias = {}
                                                     st.rerun()
                                                 except Exception as e:
                                                     st.error(str(e))
