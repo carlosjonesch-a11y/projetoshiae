@@ -1,0 +1,29 @@
+# Segredos — NUNCA commitar
+.streamlit/secrets.toml
+
+# Ambiente virtual Python
+.venv/
+venv/
+env/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Arquivos de IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Dados temporários / logs
+*.log
+*.tmp
+*.xlsx
+*.xls
+
+# OS
+.DS_Store
+Thumbs.db
