@@ -544,3 +544,21 @@ def substituir_nome_responsavel(nome_antigo: str, nome_novo: str):
         )
     _clear_cache()
 
+
+def reatribuir_por_projeto(nome_antigo: str, nome_novo: str, projeto_ids: list) -> int:
+    """
+    Move atividades de nome_antigo → nome_novo apenas nos projetos indicados.
+    Retorna quantidade de atividades atualizadas.
+    """
+    if not projeto_ids:
+        return 0
+    with cursor() as cur:
+        cur.execute(
+            f"""UPDATE atividades SET responsavel=%s
+                WHERE responsavel=%s AND projeto_id = ANY(%s::int[])""",
+            (nome_novo, nome_antigo, projeto_ids),
+        )
+        count = cur.rowcount
+    _clear_cache()
+    return count
+

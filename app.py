@@ -1068,6 +1068,58 @@ NEON_DATABASE_URL = "postgresql://user:pass@host/neondb?sslmode=require"
                 except Exception as _oe:
                     st.error(str(_oe))
 
+                # ── Reatribuição por projeto ───────────────────────────────
+                with st.expander("🔧 Reatribuir atividades por projeto (correção avançada)", expanded=False):
+                    st.caption(
+                        "Use quando atividades de uma pessoa foram atribuídas por engano a outra. "
+                        "Selecione os projetos afetados para mover apenas as atividades corretas."
+                    )
+                    try:
+                        _all_resps  = [r["nome"] for r in _db.listar_responsaveis()]
+                        _all_projs  = _db.listar_projetos()
+                        _proj_map   = {p["nome"]: p["id"] for p in _all_projs}
+
+                        _ra1, _ra2 = st.columns(2)
+                        with _ra1:
+                            _de  = st.selectbox("De (nome atual incorreto):", _all_resps, key="re_de")
+                        with _ra2:
+                            _para = st.selectbox("Para (nome correto):", _all_resps, key="re_para")
+
+                        # Mostra apenas projetos onde "_de" tem atividades
+                        try:
+                            _ativs_de = _db.listar_atividades()
+                            _projs_com_de = sorted({a["projeto_nome"] for a in _ativs_de if a.get("responsavel") == _de})
+                        except Exception:
+                            _projs_com_de = list(_proj_map.keys())
+
+                        if _projs_com_de:
+                            _proj_sel = st.multiselect(
+                                f"Projetos para reatribuir ('{_de}' aparece em {len(_projs_com_de)}):",
+                                options=_projs_com_de,
+                                default=_projs_com_de,
+                                key="re_projs",
+                            )
+                            _ids_sel = [_proj_map[p] for p in _proj_sel if p in _proj_map]
+                            _n_prev  = sum(1 for a in _ativs_de
+                                          if a.get("responsavel") == _de
+                                          and a.get("projeto_nome") in _proj_sel)
+                            st.info(f"**{_n_prev} atividade(s)** serão movidas de **'{_de}'** → **'{_para}'**")
+                            if _de != _para and st.button("✅ Confirmar reatribuição", type="primary",
+                                                          key="re_confirm", use_container_width=True):
+                                try:
+                                    _moved = _db.reatribuir_por_projeto(_de, _para, _ids_sel)
+                                    st.session_state.df = None
+                                    st.session_state.capacidade = {}
+                                    st.session_state.ferias = {}
+                                    st.success(f"✅ {_moved} atividade(s) reatribuídas de '{_de}' → '{_para}'!")
+                                    st.rerun()
+                                except Exception as _re:
+                                    st.error(str(_re))
+                        else:
+                            st.info(f"Nenhuma atividade encontrada para '{_de}'.")
+                    except Exception as _re2:
+                        st.error(str(_re2))
+
             # ── Férias ────────────────────────────────────────────────────────
             with sub_fer:
                 st.markdown("**Registrar Período de Férias**")
