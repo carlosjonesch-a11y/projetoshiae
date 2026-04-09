@@ -500,3 +500,47 @@ def checar_conflito_atividade(ferias_dict: dict, responsavel: str, semana_inicio
         sem += pd.Timedelta(weeks=1)
     return conflitantes
 
+
+# ── Reconciliação de nomes ────────────────────────────────────────────────────
+
+def listar_nomes_orfaos():
+    """
+    Retorna nomes usados em atividades ou férias que NÃO existem em responsaveis.nome.
+    Indica origem: 'atividades' e/ou 'ferias'.
+    Retorna list[dict]: [{nome, origens: list}]
+    """
+    with cursor() as cur:
+        cur.execute("SELECT DISTINCT nome FROM responsaveis")
+        nomes_validos = {r["nome"] for r in cur.fetchall()}
+
+        cur.execute("SELECT DISTINCT responsavel FROM atividades WHERE responsavel IS NOT NULL AND responsavel <> ''")
+        nomes_atv = {r["responsavel"] for r in cur.fetchall()}
+
+        cur.execute("SELECT DISTINCT responsavel FROM ferias WHERE responsavel IS NOT NULL AND responsavel <> ''")
+        nomes_fer = {r["responsavel"] for r in cur.fetchall()}
+
+    orfaos = {}
+    for nome in nomes_atv - nomes_validos:
+        orfaos.setdefault(nome, []).append("atividades")
+    for nome in nomes_fer - nomes_validos:
+        orfaos.setdefault(nome, []).append("férias")
+
+    return [{"nome": k, "origens": v} for k, v in sorted(orfaos.items())]
+
+
+def substituir_nome_responsavel(nome_antigo: str, nome_novo: str):
+    """
+    Substitui nome_antigo por nome_novo em atividades e ferias.
+    Usado para reconciliar nomes órfãos (renomeados sem cascata).
+    """
+    with cursor() as cur:
+        cur.execute(
+            "UPDATE atividades SET responsavel=%s WHERE responsavel=%s",
+            (nome_novo, nome_antigo),
+        )
+        cur.execute(
+            "UPDATE ferias SET responsavel=%s WHERE responsavel=%s",
+            (nome_novo, nome_antigo),
+        )
+    _clear_cache()
+

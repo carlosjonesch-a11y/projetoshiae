@@ -1023,6 +1023,51 @@ NEON_DATABASE_URL = "postgresql://user:pass@host/neondb?sslmode=require"
                     except Exception as e:
                         st.error(str(e))
 
+                # ── Reconciliação de nomes órfãos ──────────────────────────
+                st.markdown("---")
+                try:
+                    _orfaos = _db.listar_nomes_orfaos()
+                    if _orfaos:
+                        st.warning(
+                            f"⚠️ **{len(_orfaos)} nome(s) antigo(s) detectado(s)** em atividades/férias "
+                            "que não correspondem a nenhum responsável cadastrado. Corrija abaixo:"
+                        )
+                        _nomes_validos = [r["nome"] for r in _db.listar_responsaveis()]
+                        for _orf in _orfaos:
+                            with st.container(border=True):
+                                _oc1, _oc2, _oc3 = st.columns([2, 2, 1])
+                                with _oc1:
+                                    st.markdown(
+                                        f"**'{_orf['nome']}'** usado em: "
+                                        + ", ".join(f"*{o}*" for o in _orf["origens"])
+                                    )
+                                with _oc2:
+                                    _novo = st.selectbox(
+                                        "Mapear para:",
+                                        options=_nomes_validos,
+                                        key=f"rec_{_orf['nome']}",
+                                    )
+                                with _oc3:
+                                    if st.button(
+                                        "✅ Corrigir",
+                                        key=f"fix_{_orf['nome']}",
+                                        type="primary",
+                                        use_container_width=True,
+                                    ):
+                                        try:
+                                            _db.substituir_nome_responsavel(_orf["nome"], _novo)
+                                            st.session_state.df = None
+                                            st.session_state.capacidade = {}
+                                            st.session_state.ferias = {}
+                                            st.success(f"'{_orf['nome']}' → '{_novo}' corrigido!")
+                                            st.rerun()
+                                        except Exception as _re:
+                                            st.error(str(_re))
+                    else:
+                        st.success("✅ Todos os nomes em atividades e férias estão sincronizados com os responsáveis cadastrados.")
+                except Exception as _oe:
+                    st.error(str(_oe))
+
             # ── Férias ────────────────────────────────────────────────────────
             with sub_fer:
                 st.markdown("**Registrar Período de Férias**")
