@@ -15,16 +15,16 @@ import pandas as pd
 # Modelos verificados em 10/04/2026 — apenas produção/preview ativos no Groq.
 # Formato: (provedor, modelo)
 _FALLBACK_CHAIN = [
-    ("groq",   "llama-3.3-70b-versatile"),   # produção — principal
-    ("groq",   "openai/gpt-oss-120b"),         # produção — fallback robusto
-    ("groq",   "llama-3.1-8b-instant"),        # produção — fallback leve
-    ("gemini", "gemini-2.0-flash"),
-    ("gemini", "gemini-1.5-flash"),
+    ("groq",   "llama-3.3-70b-versatile"),    # produção — principal (testado ✅)
+    ("groq",   "openai/gpt-oss-120b"),          # produção — fallback robusto (testado ✅)
+    ("groq",   "llama-3.1-8b-instant"),         # produção — fallback leve (testado ✅)
+    ("gemini", "models/gemini-2.5-flash"),      # produção — Gemini principal (testado ✅)
+    ("gemini", "models/gemini-flash-latest"),   # produção — alias estável (testado ✅)
 ]
 
 # Compat: mantido para código externo que lê essas constantes
 _GROQ_MODEL   = "llama-3.3-70b-versatile"
-_GEMINI_MODEL = "gemini-2.0-flash"
+_GEMINI_MODEL = "models/gemini-2.5-flash"
 
 
 def _provider() -> str:
