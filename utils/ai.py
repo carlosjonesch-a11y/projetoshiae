@@ -63,13 +63,20 @@ def _call_gemini(messages: list, model: str) -> str:
     if not api_key:
         raise ValueError("GEMINI_API_KEY não configurada")
     try:
-        import google.generativeai as genai_sdk
+        from google import genai as genai_sdk
+        from google.genai import types as genai_types
     except ImportError:
-        raise ImportError("Instale: pip install google-generativeai")
-    genai_sdk.configure(api_key=api_key)
-    prompt = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
-    model_obj = genai_sdk.GenerativeModel(model)
-    resp = model_obj.generate_content(prompt)
+        raise ImportError("Instale: pip install google-genai")
+    client = genai_sdk.Client(api_key=api_key)
+    # Converte messages para o formato do SDK
+    contents = []
+    for m in messages:
+        role = "user" if m["role"] in ("user", "system") else "model"
+        contents.append(genai_types.Content(
+            role=role,
+            parts=[genai_types.Part(text=m["content"])],
+        ))
+    resp = client.models.generate_content(model=model, contents=contents)
     return resp.text
 
 
