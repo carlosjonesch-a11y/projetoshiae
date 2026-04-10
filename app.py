@@ -172,6 +172,16 @@ for _k, _v in [
     ("edit_proj", None), ("edit_resp", None), ("edit_atv", None),
     ("hm_sel", None),
     ("proj_meta", {}),
+    ("encad_preview", None),
+    ("encad_proj_id", None),
+    ("ia_chat_history", []),
+    ("ia_suggestions", []),
+    ("ia_enc_preview", None),
+    ("ia_enc_proj_nome", None),
+    ("enc_manual_preview", None),
+    ("enc_manual_alvo", None),
+    ("enc_undo_snapshot", None),
+    ("_needs_reload", False),
 ]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -207,7 +217,12 @@ st.markdown("""
 
 # ── Auto-load do banco ─────────────────────────────────────────────────────────
 from utils import db as _db_loader
-if st.session_state.df is None and _db_loader.is_configured():
+_should_reload = (
+    st.session_state.df is None
+    or st.session_state.get("_needs_reload", False)
+)
+if _should_reload and _db_loader.is_configured():
+    st.session_state["_needs_reload"] = False  # consome o flag
     try:
         df_db, fer_db, sem_db, pes_db, proj_db = _db_loader.carregar_cronograma_do_banco()
         if df_db is not None:
@@ -220,15 +235,13 @@ if st.session_state.df is None and _db_loader.is_configured():
                 st.session_state.ferias = _db_loader.carregar_ferias_como_dict()
             except Exception:
                 st.session_state.ferias = fer_db
-            # Carrega capacidade da tabela responsaveis (persiste entre sessões)
+            # Carrega capacidade SEMPRE do banco (não só pra novos)
             try:
                 _resps_load = _db_loader.listar_responsaveis()
                 _cap_db = {r["nome"]: int(r["capacidade_semanal"]) for r in _resps_load}
+                st.session_state.capacidade = _cap_db
             except Exception:
-                _cap_db = {}
-            for p in pes_db:
-                if p not in st.session_state.capacidade:
-                    st.session_state.capacidade[p] = _cap_db.get(p, 36)
+                pass
             # Carrega metadados de projetos para filtros de Unidade/Departamento
             try:
                 _projs_meta = _db_loader.listar_projetos()
@@ -251,6 +264,7 @@ if st.session_state.df is None:
     if not _db_loader.is_configured():
         st.warning("⚙️ Configure `NEON_DATABASE_URL` em `.streamlit/secrets.toml` para conectar ao banco.")
     st.stop()
+
 
 # ── Referências ────────────────────────────────────────────────────────────────
 df         = st.session_state.df
@@ -403,10 +417,10 @@ st.markdown("<div style='margin-top:10px'></div>", unsafe_allow_html=True)
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 (
     tab_ocup, tab_gantt, tab_proj, tab_evol,
-    tab_pess, tab_cap, tab_cad,
+    tab_pess, tab_cap, tab_cad, tab_ia,
 ) = st.tabs([
     "🌡️ Ocupação", "📅 Gantt", "🏆 Projetos", "📈 Evolução",
-    "👥 Pessoas",  "⚡ Capacidade", "🗄️ Cadastro",
+    "👥 Pessoas",  "⚡ Capacidade", "🗄️ Cadastro", "🤖 IA Gestão",
 ])
 
 # ═══ OCUPAÇÃO ══════════════════════════════════════════════════════════════════
@@ -422,24 +436,59 @@ with tab_ocup:
             on_select="rerun",
             key="hm_ocup",
         )
-        # captura clique
+        # captura clique via on_select (funciona em Streamlit >=1.33 com clickmode='event+select')
         _pts = []
         if _ev and hasattr(_ev, "selection") and _ev.selection:
             _pts = getattr(_ev.selection, "points", []) or []
         if _pts:
             _pt = _pts[0]
-            st.session_state["hm_sel"] = {
-                "pessoa":  _pt.get("y"),
-                "x_label": _pt.get("x"),
-            }
+            # go.Heatmap pode retornar y/x como string ou index — normaliza
+            _y_raw = _pt.get("y")
+            _x_raw = _pt.get("x")
+            if isinstance(_y_raw, (int, float)):
+                _y_raw = pessoas_filtro[int(_y_raw)] if int(_y_raw) < len(pessoas_filtro) else None
+            if _y_raw is not None and _x_raw is not None:
+                st.session_state["hm_sel"] = {
+                    "pessoa":  str(_y_raw),
+                    "x_label": str(_x_raw),
+                }
 
-        # ── Painel de atividades da célula clicada ─────────────────────────
+        # ── Seletor manual (sempre disponível como alternativa ao clique) ──
+        _hm_labels_x = [pd.Timestamp(s).strftime("%d/%m") for s in semanas_filtro]
+        st.caption("💡 **Clique numa célula** ou use os seletores abaixo para ver e editar atividades:")
+        _hmc1, _hmc2, _hmc3 = st.columns([2, 2, 1])
+        with _hmc1:
+            _pick_pessoa = st.selectbox(
+                "Pessoa", ["— selecione —"] + list(pessoas_filtro),
+                key="hm_pick_pessoa", label_visibility="collapsed",
+            )
+        with _hmc2:
+            _pick_sem = st.selectbox(
+                "Semana", ["— selecione —"] + _hm_labels_x,
+                key="hm_pick_sem", label_visibility="collapsed",
+            )
+        with _hmc3:
+            if st.button("🔍 Ver", key="hm_pick_btn", use_container_width=True):
+                if _pick_pessoa != "— selecione —" and _pick_sem != "— selecione —":
+                    st.session_state["hm_sel"] = {"pessoa": _pick_pessoa, "x_label": _pick_sem}
+                    st.rerun()
+
+        # ── Painel de atividades da célula selecionada ─────────────────────
         _sel = st.session_state.get("hm_sel")
         if _sel and _sel.get("pessoa") and _sel.get("x_label"):
             _hm_pessoa  = _sel["pessoa"]
             _hm_x_label = _sel["x_label"]
             _hm_semana  = _label_to_sem.get(_hm_x_label)
 
+            # Carga atual da pessoa na semana selecionada
+            _hm_horas_sem = 0.0
+            if _hm_semana is not None and df is not None:
+                _mask = (df["Responsável"] == _hm_pessoa) & (df["Semana"] == pd.Timestamp(_hm_semana))
+                _hm_horas_sem = float(df[_mask]["Horas"].sum())
+            _hm_cap = capacidade.get(_hm_pessoa, 36)
+            _hm_pct = round(_hm_horas_sem / _hm_cap * 100) if _hm_cap > 0 else 0
+
+            st.markdown("---")
             _ht1, _ht2 = st.columns([6, 1])
             with _ht1:
                 st.markdown(
@@ -451,6 +500,55 @@ with tab_ocup:
                     st.session_state["hm_sel"] = None
                     st.rerun()
 
+            # Barra de carga semanal
+            _cor_bar = "normal" if _hm_pct <= 90 else ("off" if _hm_pct <= 110 else "inverse")
+            st.progress(
+                min(_hm_pct / 100, 1.0),
+                text=f"Carga semana {_hm_x_label}: **{_hm_horas_sem:.0f}h** de {_hm_cap}h ({_hm_pct}%)"
+                     + (" 🔴 SOBRECARGA" if _hm_pct > 110 else (" 🟡" if _hm_pct > 90 else (" 🟢" if _hm_pct > 60 else " ⬜"))),
+            )
+
+            # ── Gráfico empilhado: horas/projeto × semana para a pessoa selecionada ──
+            if df is not None:
+                _df_p = df[df["Responsável"] == _hm_pessoa].copy()
+                if not _df_p.empty:
+                    import plotly.graph_objects as _go
+                    _sems_all = sorted(_df_p["Semana"].unique())
+                    _sems_lbl = [pd.Timestamp(s).strftime("%d/%m") for s in _sems_all]
+                    _projs_p  = sorted(_df_p["Projeto"].dropna().unique())
+                    _fig_stk  = _go.Figure()
+                    for _proj in _projs_p:
+                        _y_vals = [
+                            float(_df_p[(_df_p["Semana"] == s) & (_df_p["Projeto"] == _proj)]["Horas"].sum())
+                            for s in _sems_all
+                        ]
+                        _fig_stk.add_trace(_go.Bar(name=_proj, x=_sems_lbl, y=_y_vals))
+                    # Linha de capacidade
+                    _fig_stk.add_trace(_go.Scatter(
+                        x=_sems_lbl, y=[_hm_cap] * len(_sems_lbl),
+                        mode="lines", name=f"Cap. ({_hm_cap}h)",
+                        line=dict(color="red", dash="dash", width=1.5),
+                        showlegend=True,
+                    ))
+                    # Destaque da semana selecionada
+                    if _hm_x_label in _sems_lbl:
+                        _xi = _sems_lbl.index(_hm_x_label)
+                        _fig_stk.add_vrect(
+                            x0=_xi - 0.5, x1=_xi + 0.5,
+                            fillcolor="royalblue", opacity=0.12, line_width=0,
+                        )
+                    _fig_stk.update_layout(
+                        barmode="stack", height=300,
+                        margin=dict(l=0, r=0, t=28, b=0),
+                        legend=dict(orientation="h", yanchor="top", y=-0.20, xanchor="left", x=0),
+                        paper_bgcolor="white", plot_bgcolor="white",
+                        title=dict(text=f"Demanda semanal por projeto — {_hm_pessoa}", font=dict(size=13)),
+                        yaxis=dict(title="horas"),
+                        xaxis=dict(tickangle=-45),
+                    )
+                    st.plotly_chart(_fig_stk, use_container_width=True, key="hm_stk_bar")
+                    st.caption(f"🟦 Semana {_hm_x_label} destacada · 🔴 linha = capacidade ({_hm_cap}h/sem)")
+
             if _hm_semana:
                 try:
                     from utils import db as _db_hm
@@ -458,65 +556,88 @@ with tab_ocup:
                         _hm_pessoa, pd.Timestamp(_hm_semana).date()
                     )
                     if _ativs_hm:
+                        # Carga de cada pessoa na semana (para dropdown de redistribuição)
+                        _carga_sem = {}
+                        if df is not None:
+                            for _pp in pessoas_filtro:
+                                _mm = (df["Responsável"] == _pp) & (df["Semana"] == pd.Timestamp(_hm_semana))
+                                _carga_sem[_pp] = float(df[_mm]["Horas"].sum())
+
                         for _atv in _ativs_hm:
-                            with st.expander(
-                                f"📌 **{_atv['projeto_nome']}** — {_atv['nome']}",
-                                expanded=True,
-                            ):
+                            _atv_label = f"📌 **{_atv['projeto_nome']}** — {_atv['nome']} ({_fh(float(_atv.get('horas_estimadas') or 0))})"
+                            with st.expander(_atv_label, expanded=True):
                                 with st.form(f"hm_edit_{_atv['id']}"):
-                                    _lc1, _lc2 = st.columns(2)
-                                    with _lc1:
+                                    _ea1, _ea2 = st.columns(2)
+                                    with _ea1:
+                                        _new_nome = st.text_input("🏷️ Nome", value=_atv["nome"])
+                                        _new_horas = st.number_input(
+                                            "⏱️ Total de horas", 0.0, 9999.0,
+                                            float(_atv.get("horas_estimadas") or 0), step=0.5,
+                                            help="Horas TOTAIS da atividade — divididas pelo nº de semanas",
+                                        )
+                                        if _atv.get("semana_inicio") and _atv.get("semana_fim") and _new_horas > 0:
+                                            _nsem_hm = max(1, ((_atv["semana_fim"] - _atv["semana_inicio"]).days // 7) + 1)
+                                            st.caption(f"📊 ≈ **{_new_horas / _nsem_hm:.1f} h/semana** ({_nsem_hm} sem.)")
+                                    with _ea2:
+                                        # Dropdown de responsável com carga de cada um
+                                        _resp_opts_hm = [
+                                            f"{p}  ({_carga_sem.get(p, 0):.0f}h / {capacidade.get(p, 36)}h)"
+                                            for p in pessoas_filtro
+                                        ]
+                                        _resp_labels_hm = list(pessoas_filtro)
+                                        _resp_idx_hm = _resp_labels_hm.index(_atv["responsavel"]) \
+                                            if _atv.get("responsavel") in _resp_labels_hm else 0
+                                        _new_resp_display = st.selectbox(
+                                            "👤 Responsável",
+                                            _resp_opts_hm,
+                                            index=_resp_idx_hm,
+                                        )
+                                        _new_resp = _resp_labels_hm[_resp_opts_hm.index(_new_resp_display)]
                                         _new_ini = st.date_input(
                                             "📅 Início", value=_atv["semana_inicio"],
                                             format="DD/MM/YYYY",
                                         )
-                                    with _lc2:
                                         _new_fim = st.date_input(
                                             "📅 Término", value=_atv["semana_fim"],
                                             format="DD/MM/YYYY",
                                         )
-                                    if st.form_submit_button(
-                                        "💾 Salvar datas", type="primary", use_container_width=True
-                                    ):
-                                        try:
-                                            _db_hm.atualizar_atividade(
-                                                _atv["id"],
-                                                _atv["nome"],
-                                                _atv["responsavel"],
-                                                float(_atv.get("horas_estimadas") or 0),
-                                                _new_ini,
-                                                _new_fim,
-                                                int(_atv.get("ordem") or 0),
-                                            )
-                                            st.success("✅ Datas atualizadas!")
-                                            st.rerun()
-                                        except Exception as _e:
-                                            st.error(str(_e))
+                                    _sb1, _sb2 = st.columns(2)
+                                    with _sb1:
+                                        if st.form_submit_button("💾 Salvar", type="primary", use_container_width=True):
+                                            try:
+                                                _db_hm.atualizar_atividade(
+                                                    _atv["id"], _new_nome, _new_resp,
+                                                    _new_horas, _new_ini, _new_fim,
+                                                    int(_atv.get("ordem") or 0),
+                                                )
+                                                st.success("✅ Atividade atualizada!")
+                                                st.session_state.df = None
+                                                st.rerun()
+                                            except Exception as _e:
+                                                st.error(str(_e))
+                                    with _sb2:
+                                        if st.form_submit_button("🗑️ Excluir", use_container_width=True):
+                                            try:
+                                                _db_hm.deletar_atividade(_atv["id"])
+                                                st.session_state.df = None
+                                                st.session_state["hm_sel"] = None
+                                                st.rerun()
+                                            except Exception as _e:
+                                                st.error(str(_e))
                     else:
-                        # fallback: mostrar do df (sem edição de datas)
                         _df_cell = df[
-                            (df["Responsável"] == _hm_pessoa) & (df["Semana"] == _hm_semana)
-                        ]
+                            (df["Responsável"] == _hm_pessoa) & (df["Semana"] == pd.Timestamp(_hm_semana))
+                        ] if df is not None else pd.DataFrame()
                         if not _df_cell.empty:
-                            for _, _row in (
-                                _df_cell.drop_duplicates(["Projeto", "Atividade"]).iterrows()
-                            ):
+                            for _, _row in _df_cell.drop_duplicates(["Projeto", "Atividade"]).iterrows():
                                 st.info(
-                                    f"📌 **{_row['Projeto']}** — {_row['Atividade']} "
-                                    f"({_fh(_row['Horas'])})"
-                                    "\n\n_Atividade não cadastrada no banco — edição de datas indisponível._"
+                                    f"📌 **{_row['Projeto']}** — {_row['Atividade']} ({_fh(_row['Horas'])})"
+                                    "\n\n_Atividade do banco não encontrada — use a aba Cadastro para editar._"
                                 )
                         else:
                             st.info("Nenhuma atividade encontrada para esta célula.")
                 except Exception as _exc:
-                    _df_cell = df[
-                        (df["Responsável"] == _hm_pessoa) & (df["Semana"] == _hm_semana)
-                    ]
-                    if not _df_cell.empty:
-                        for _, _row in _df_cell.drop_duplicates(["Projeto", "Atividade"]).iterrows():
-                            st.info(f"📌 **{_row['Projeto']}** — {_row['Atividade']} ({_fh(_row['Horas'])})") 
-                    else:
-                        st.warning(f"Erro ao buscar atividades: {_exc}")
+                    st.warning(f"Erro ao buscar atividades: {_exc}")
     if not df_sob.empty:
         st.markdown('<p class="section-title">⚠️ Alertas de Sobrecarga</p>', unsafe_allow_html=True)
         df_sob_disp = df_sob.copy()
@@ -731,11 +852,13 @@ NEON_DATABASE_URL = "postgresql://user:pass@host/neondb?sslmode=require"
                             depto_p = st.text_input("Departamento", placeholder="Ex: Projetos")
                             tipo_p  = st.text_input("Tipo de Projeto", placeholder="Ex: Implantação")
                         status_p = st.selectbox("Status", ["Ativo", "Pausado", "Concluído"])
+                        venc_p   = st.date_input("📅 Data de Vencimento", value=None, format="DD/MM/YYYY")
                         if st.form_submit_button("➕ Salvar Projeto", type="primary", use_container_width=True):
                             if nome_p.strip():
                                 try:
                                     _db.inserir_projeto(nome_p, desc_p, status_p,
-                                                        unid_p, depto_p, subarea_p, tipo_p)
+                                                        unid_p, depto_p, subarea_p, tipo_p,
+                                                        data_vencimento=venc_p or None)
                                     st.success("Projeto salvo!")
                                     st.rerun()
                                 except Exception as e:
@@ -763,12 +886,18 @@ NEON_DATABASE_URL = "postgresql://user:pass@host/neondb?sslmode=require"
                                         _stati    = ["Ativo", "Pausado", "Concluído"]
                                         ep_status = st.selectbox("Status", _stati,
                                                                   index=_stati.index(p.get("status", "Ativo")))
+                                        ep_venc   = st.date_input(
+                                            "📅 Data de Vencimento",
+                                            value=p.get("data_vencimento"),
+                                            format="DD/MM/YYYY",
+                                        )
                                         cs1, cs2 = st.columns(2)
                                         with cs1:
                                             if st.form_submit_button("💾 Salvar", type="primary", use_container_width=True):
                                                 try:
                                                     _db.atualizar_projeto(p["id"], ep_nome, ep_desc, ep_status,
-                                                                          ep_unid, ep_depto, ep_sub, ep_tipo)
+                                                                          ep_unid, ep_depto, ep_sub, ep_tipo,
+                                                                          data_vencimento=ep_venc or None)
                                                     st.session_state.edit_proj = None
                                                     st.session_state.df = None  # força recarga com novo nome
                                                     st.rerun()
@@ -789,6 +918,14 @@ NEON_DATABASE_URL = "postgresql://user:pass@host/neondb?sslmode=require"
                                             if p.get("departamento"):  meta.append(f"🏢 {p['departamento']}")
                                             if p.get("subarea"):       meta.append(f"📂 {p['subarea']}")
                                             if p.get("tipo_projeto"):  meta.append(f"🏷️ {p['tipo_projeto']}")
+                                            if p.get("data_vencimento"):
+                                                import datetime as _dt_venc
+                                                _vd = p["data_vencimento"]
+                                                _vd_str = _vd.strftime("%d/%m/%Y") if hasattr(_vd, "strftime") else str(_vd)
+                                                _hoje = _dt_venc.date.today()
+                                                _vd_date = _vd if hasattr(_vd, "year") else _dt_venc.date.fromisoformat(str(_vd))
+                                                _vd_icon = "🔴" if _vd_date < _hoje else ("🟡" if (_vd_date - _hoje).days <= 30 else "🟢")
+                                                meta.append(f"{_vd_icon} Vence {_vd_str}")
                                             if meta:
                                                 st.caption("  ·  ".join(meta))
                                             if p.get("descricao"):
@@ -825,10 +962,17 @@ NEON_DATABASE_URL = "postgresql://user:pass@host/neondb?sslmode=require"
                             ordem_a  = st.number_input("Ordem (1ª, 2ª, 3ª…)", 0, 999, 0, step=1,
                                                         help="Define a sequência: 1 = primeira atividade do projeto")
                             resp_a   = st.selectbox("Responsável", pessoas if pessoas else [""])
-                            horas_a  = st.number_input("Horas estimadas", 0.0, 9999.0, step=0.5)
+                            horas_a  = st.number_input(
+                                "⏱️ Total de horas da atividade", 0.0, 9999.0, step=0.5,
+                                help="Horas TOTAIS para toda a atividade. Serão divididas igualmente pelo número de semanas do período.",
+                            )
                             dc1, dc2 = st.columns(2)
                             with dc1: dt_ini = st.date_input("Início", format="DD/MM/YYYY")
                             with dc2: dt_fim = st.date_input("Término", format="DD/MM/YYYY")
+                            if horas_a > 0 and dt_fim >= dt_ini:
+                                _n_sem_prev = max(1, ((dt_fim - dt_ini).days // 7) + 1)
+                                _hpw_prev   = horas_a / _n_sem_prev
+                                st.caption(f"📊 {horas_a:.0f}h ÷ {_n_sem_prev} semana(s) = **{_hpw_prev:.1f} h/semana** no heatmap")
                             if st.form_submit_button("➕ Salvar Atividade", type="primary"):
                                 if nome_a.strip():
                                     try:
@@ -870,20 +1014,24 @@ NEON_DATABASE_URL = "postgresql://user:pass@host/neondb?sslmode=require"
                                 pass
 
                 with af2:
-                    _col_title, _col_btn = st.columns([3, 1])
-                    with _col_title:
-                        st.markdown("**Atividades por Projeto**")
-                    with _col_btn:
-                        if st.button("🔢 Reordenar por data", help="Reclassifica a ordem de todas as atividades de todos os projetos pela data de início", use_container_width=True):
-                            try:
-                                _n = _db.reordenar_atividades_por_data()
-                                st.success(f"{_n} atividade(s) reordenadas!")
-                                st.session_state.df = None
-                                st.rerun()
-                            except Exception as _e:
-                                st.error(str(_e))
+                    st.markdown("**Atividades por Projeto**")
                     if proj_opts:
-                        proj_view = st.selectbox("Selecionar projeto:", list(proj_opts.keys()), key="av_sel")
+                        _av_c1, _av_c2 = st.columns([3, 2])
+                        with _av_c1:
+                            proj_view = st.selectbox(
+                                "Selecionar projeto:", list(proj_opts.keys()),
+                                key="av_sel", label_visibility="collapsed",
+                            )
+                        with _av_c2:
+                            if st.button("🔢 Reordenar", help="Reclassifica a ordem de todas as atividades do projeto pela data de início", use_container_width=True):
+                                try:
+                                    _n = _db.reordenar_atividades_por_data()
+                                    st.success(f"{_n} atividade(s) reordenadas!")
+                                    st.session_state.df = None
+                                    st.rerun()
+                                except Exception as _e:
+                                    st.error(str(_e))
+
                         try:
                             ativs = _db.listar_atividades(proj_opts[proj_view])
                             if ativs:
@@ -898,10 +1046,18 @@ NEON_DATABASE_URL = "postgresql://user:pass@host/neondb?sslmode=require"
                                                                      pessoas if pessoas else [""],
                                                                      index=(pessoas.index(atv["responsavel"])
                                                                             if atv.get("responsavel") in pessoas else 0))
-                                            ea_h     = st.number_input("Horas", 0.0, 9999.0,
-                                                                        float(atv.get("horas_estimadas") or 0), step=0.5)
+                                            ea_h     = st.number_input(
+                                                "⏱️ Total de horas", 0.0, 9999.0,
+                                                float(atv.get("horas_estimadas") or 0), step=0.5,
+                                                help="Horas TOTAIS da atividade — divididas pelo nº de semanas",
+                                            )
                                             ea_ini   = st.date_input("Início", value=atv.get("semana_inicio"), format="DD/MM/YYYY")
                                             ea_fim   = st.date_input("Término", value=atv.get("semana_fim"), format="DD/MM/YYYY")
+                                            if ea_h > 0 and atv.get("semana_inicio") and atv.get("semana_fim"):
+                                                _nsem_ed = max(1, ((ea_fim - ea_ini).days // 7) + 1)
+                                                st.caption(f"📊 ≈ **{ea_h / _nsem_ed:.1f} h/semana** ({_nsem_ed} sem.)")
+                                            elif ea_h > 0:
+                                                st.caption("📊 Defina início e término para ver h/semana")
                                             as1, as2 = st.columns(2)
                                             with as1:
                                                 if st.form_submit_button("💾 Salvar", type="primary"):
@@ -1198,3 +1354,607 @@ NEON_DATABASE_URL = "postgresql://user:pass@host/neondb?sslmode=require"
                             st.info("Nenhum período de férias cadastrado.")
                     except Exception as e:
                         st.error(str(e))
+
+# ═══ IA GESTÃO ═════════════════════════════════════════════════════════════════
+with tab_ia:
+    from utils import ai as _ai
+
+    st.markdown('<p class="section-title">🤖 Gestão Inteligente com IA</p>', unsafe_allow_html=True)
+
+    if not _ai.is_configured():
+        st.warning(
+            "⚠️ **Nenhuma chave de IA configurada.** Adicione em `.streamlit/secrets.toml`:\n\n"
+            "```toml\n# Groq (gratuito) — https://console.groq.com/keys\n"
+            "AI_PROVIDER = \"groq\"\nGROQ_API_KEY = \"gsk_...\"\n\n"
+            "# OU Gemini — https://aistudio.google.com/apikey\n"
+            "AI_PROVIDER = \"gemini\"\nGEMINI_API_KEY = \"AIza...\"\n```\n"
+        )
+        st.stop()
+
+    # Monta contexto completo uma vez por execução
+    @st.cache_data(ttl=30, show_spinner=False)
+    def _build_ia_context(_df_hash, _cap_hash, _fer_hash):
+        try:
+            _ativs_all = _db.listar_atividades()
+            return _ai.build_context(df, capacidade, ferias, _ativs_all)
+        except Exception:
+            return {"capacidade_semanal": {}, "ferias": {}, "carga_atual": [],
+                    "sobrecargas": [], "atividades": []}
+
+    _ia_ctx = _build_ia_context(
+        str(id(df)),
+        str(sorted(capacidade.items())),
+        str(sorted(ferias.keys())),
+    )
+
+    ia_tab1, ia_tab2 = st.tabs([
+        "🤖 Agente de Cronograma",
+        "💬 Chat",
+    ])
+
+    # ── Agente de Cronograma ───────────────────────────────────────────────────
+    with ia_tab1:
+        from utils import agente as _agente
+        import json as _json
+
+        st.markdown("**Converse com o agente para criar projetos, redistribuir atividades, detectar conflitos e reagendar.**")
+
+        if "agente_estado" not in st.session_state:
+            st.session_state["agente_estado"] = _agente.estado_inicial()
+        if "agente_chat_history" not in st.session_state:
+            st.session_state["agente_chat_history"] = []
+
+        # Chips de ação rápida
+        _chip_c1, _chip_c2, _chip_c3, _chip_c4 = st.columns(4)
+        _chip_msg = None
+        with _chip_c1:
+            if st.button("🔍 Detectar conflitos", use_container_width=True, key="chip_conflitos"):
+                _chip_msg = "Detecte todos os conflitos e sobrecargas no cronograma atual."
+        with _chip_c2:
+            if st.button("➕ Criar novo projeto", use_container_width=True, key="chip_criar"):
+                # Vai direto para o formulário sem passar pelo router
+                _novo_est = _agente.estado_inicial()
+                _novo_est["intencao"] = "criar_projeto"
+                _novo_est["fase"]     = "coletando"
+                st.session_state["agente_estado"] = _novo_est
+                st.rerun()
+        with _chip_c3:
+            if st.button("♻️ Ver sobrecargas", use_container_width=True, key="chip_sobrecargas"):
+                _chip_msg = "Mostre as sobrecargas de cada pessoa no período atual."
+        with _chip_c4:
+            if st.button("📅 Sugerir reagendamento", use_container_width=True, key="chip_reagendar"):
+                _chip_msg = "Sugira reagendamentos para equilibrar a carga de trabalho."
+
+        # Exibe histórico
+        for _amsg in st.session_state["agente_chat_history"]:
+            with st.chat_message(_amsg["role"]):
+                st.markdown(_amsg["content"])
+
+        # ── Formulário de novo projeto (quando em modo coletando criar_projeto) ──
+        _ag_est_now = st.session_state["agente_estado"]
+        if _ag_est_now.get("intencao") == "criar_projeto" and _ag_est_now.get("fase") == "coletando":
+            _dados_par = _ag_est_now.get("dados_coletados", {})
+            _tipos_atv_opts = ["diagnostico", "dados", "predicoes", "dashboard",
+                               "implantacao", "sustentacao", "expansao", "outros"]
+            _unidades_opts  = sorted({v.get("unidade", "") for v in st.session_state.get("proj_meta", {}).values() if v.get("unidade")})
+            if not _unidades_opts:
+                _unidades_opts = ["CMC", "CMA", "HMVSC", "HOEB"]
+
+            with st.container(border=True):
+                st.markdown("#### 📁 Novo Projeto")
+                with st.form("form_novo_projeto", border=False):
+                    _fp_c1, _fp_c2 = st.columns([2, 1])
+                    with _fp_c1:
+                        _f_nome = st.text_input("Nome do projeto *",
+                                                value=_dados_par.get("nome_projeto", ""),
+                                                placeholder="Ex: Predição de risco de reinternação")
+                    with _fp_c2:
+                        _f_unidade = st.selectbox("Unidade", [""] + _unidades_opts,
+                                                   index=0)
+                    _fp_c3, _fp_c4 = st.columns([1, 1])
+                    with _fp_c3:
+                        import datetime as _dt_form
+                        _f_prazo = st.date_input("Prazo de entrega *",
+                                                  value=None,
+                                                  format="DD/MM/YYYY",
+                                                  min_value=_dt_form.date.today())
+                    with _fp_c4:
+                        _f_depto = st.text_input("Departamento (opcional)",
+                                                  value=_dados_par.get("departamento", ""),
+                                                  placeholder="Ex: Oncologia")
+
+                    st.markdown("**Atividades do projeto** — adicione todas as fases:")
+                    _atv_default = pd.DataFrame([
+                        {"Tipo": "diagnostico",  "Nome da Atividade": "Diagnóstico e Entendimento",      "Responsável": "", "Horas": 30},
+                        {"Tipo": "dados",        "Nome da Atividade": "Estruturação e Curadoria de Dados","Responsável": "", "Horas": 40},
+                        {"Tipo": "predicoes",    "Nome da Atividade": "Modelagem Preditiva",              "Responsável": "", "Horas": 80},
+                        {"Tipo": "dashboard",    "Nome da Atividade": "Dashboard e Visualização",         "Responsável": "", "Horas": 60},
+                        {"Tipo": "implantacao",  "Nome da Atividade": "Implantação e Go-Live",            "Responsável": "", "Horas": 20},
+                    ])
+                    _f_ativs = st.data_editor(
+                        _atv_default,
+                        column_config={
+                            "Tipo": st.column_config.SelectboxColumn(
+                                "Tipo", options=_tipos_atv_opts, required=True),
+                            "Nome da Atividade": st.column_config.TextColumn(
+                                "Nome da Atividade", required=True),
+                            "Responsável": st.column_config.SelectboxColumn(
+                                "Responsável", options=[""] + (pessoas or []), required=True),
+                            "Horas": st.column_config.NumberColumn(
+                                "Horas", min_value=1, max_value=2000, format="%d h"),
+                        },
+                        num_rows="dynamic",
+                        use_container_width=True,
+                        hide_index=True,
+                        key="form_ativs_editor",
+                    )
+
+                    _fs_c1, _fs_c2 = st.columns([3, 1])
+                    with _fs_c1:
+                        _f_submit = st.form_submit_button(
+                            "🤖 Gerar plano com IA", type="primary", use_container_width=True)
+                    with _fs_c2:
+                        _f_cancel_placeholder = st.form_submit_button(
+                            "✖ Cancelar", use_container_width=True)
+
+                    if _f_cancel_placeholder:
+                        st.session_state["agente_estado"] = _agente.estado_inicial()
+                        st.rerun()
+
+                    if _f_submit:
+                        _f_erros = []
+                        if not _f_nome.strip():
+                            _f_erros.append("Nome do projeto é obrigatório.")
+                        if not _f_prazo:
+                            _f_erros.append("Prazo de entrega é obrigatório.")
+                        _f_ativs_validas = _f_ativs[
+                            _f_ativs["Responsável"].notna() & (_f_ativs["Responsável"] != "") &
+                            _f_ativs["Nome da Atividade"].notna() & (_f_ativs["Nome da Atividade"] != "")
+                        ]
+                        if _f_ativs_validas.empty:
+                            _f_erros.append("Adicione ao menos uma atividade com nome e responsável.")
+                        if _f_erros:
+                            for _fe in _f_erros:
+                                st.error(_fe)
+                        else:
+                            _dados_form = {
+                                "nome_projeto":    _f_nome.strip(),
+                                "data_vencimento": _f_prazo.strftime("%Y-%m-%d"),
+                                "unidade":         _f_unidade,
+                                "departamento":    _f_depto.strip(),
+                                "atividades": [
+                                    {
+                                        "nome":             row["Nome da Atividade"],
+                                        "tipo":             row["Tipo"],
+                                        "responsavel":      row["Responsável"],
+                                        "horas_estimadas":  int(row["Horas"]),
+                                    }
+                                    for _, row in _f_ativs_validas.iterrows()
+                                ],
+                            }
+                            _ag_ctx = {
+                                "df": df, "capacidade": capacidade,
+                                "ferias": ferias, "responsaveis": pessoas,
+                                "projetos_meta": st.session_state.get("proj_meta", {}),
+                                "atividades_list": [],
+                            }
+                            _msg_form = f"Criar projeto '{_f_nome.strip()}' vencendo em {_f_prazo.strftime('%d/%m/%Y')}."
+                            with st.spinner("🤖 Gerando plano com IA..."):
+                                try:
+                                    _ag_result = _agente.criar_projeto_do_formulario(
+                                        _dados_form,
+                                        st.session_state["agente_chat_history"],
+                                        st.session_state["agente_estado"],
+                                        _ag_ctx,
+                                    )
+                                    _ag_resposta = _ag_result["resposta_texto"]
+                                    _ag_estado   = _ag_result["estado"]
+                                except Exception as _age:
+                                    _ag_resposta = f"❌ Erro ao gerar plano: {_age}"
+                                    _ag_estado   = _agente.estado_inicial()
+                            _ag_hist = st.session_state["agente_chat_history"]
+                            _ag_hist.append({"role": "user",      "content": _msg_form})
+                            _ag_hist.append({"role": "assistant",  "content": _ag_resposta})
+                            st.session_state["agente_chat_history"] = _ag_hist
+                            st.session_state["agente_estado"]       = _ag_estado
+                            st.rerun()
+
+        else:
+            # ── Chat normal (detectar conflitos, redistribuir, consultar) ─────
+            _agente_input = st.chat_input(
+                "Ex: Detectar conflitos | Ver sobrecargas | Redistribuir atividades de Daniel",
+                key="agente_chat_input",
+            )
+            _user_msg = _agente_input or _chip_msg
+            if _user_msg:
+                _ag_history = st.session_state["agente_chat_history"]
+                _ag_estado  = st.session_state["agente_estado"]
+                _ag_ctx = {
+                    "df": df, "capacidade": capacidade,
+                    "ferias": ferias, "responsaveis": pessoas,
+                    "projetos_meta": st.session_state.get("proj_meta", {}),
+                    "atividades_list": [],
+                }
+                with st.chat_message("user"):
+                    st.markdown(_user_msg)
+                with st.chat_message("assistant"):
+                    with st.spinner("Agente analisando..."):
+                        try:
+                            _ag_result   = _agente.processar_mensagem(_user_msg, _ag_history, _ag_estado, _ag_ctx)
+                            _ag_resposta = _ag_result["resposta_texto"]
+                            _ag_estado   = _ag_result["estado"]
+                        except Exception as _age:
+                            _ag_resposta = f"❌ Erro no agente: {_age}"
+                            _ag_estado   = st.session_state["agente_estado"]
+                    st.markdown(_ag_resposta)
+                _ag_history.append({"role": "user",      "content": _user_msg})
+                _ag_history.append({"role": "assistant",  "content": _ag_resposta})
+                st.session_state["agente_chat_history"] = _ag_history
+                st.session_state["agente_estado"]       = _ag_estado
+
+        # Plano pendente de aplicação
+        _ag_plano = st.session_state["agente_estado"].get("plano_proposto")
+        if _ag_plano:
+            with st.container(border=True):
+                if _ag_plano.get("tipo") == "mudancas":
+                    _chg = _ag_plano.get("changes", [])
+                    st.caption(f"📋 **{len(_chg)} mudança(s) prontas para aplicar:**")
+                    _chg_rows = [
+                        {"Atividade": c.get("atv_nome", c.get("nome", "?")),
+                         "Responsável Novo": c.get("responsavel_novo", c.get("novo_responsavel", "—")),
+                         "Motivo": c.get("motivo", "")}
+                        for c in _chg
+                    ]
+                    st.dataframe(pd.DataFrame(_chg_rows), use_container_width=True, hide_index=True)
+                elif _ag_plano.get("tipo") == "criar_projeto":
+                    _pinfo = _ag_plano.get("projeto", {})
+                    _ainfo = _ag_plano.get("atividades", [])
+                    st.caption(f"📋 **Novo projeto: {_pinfo.get('nome', '?')} — {len(_ainfo)} atividade(s)**")
+                    if _ainfo:
+                        _atv_rows = [
+                            {
+                                "Atividade": a.get("nome"),
+                                "Responsável": a.get("responsavel"),
+                                "Horas": a.get("horas_estimadas", ""),
+                                "Início": a["semana_inicio"].strftime("%d/%m/%Y") if a.get("semana_inicio") else "—",
+                                "Fim":    a["semana_fim"].strftime("%d/%m/%Y") if a.get("semana_fim") else "—",
+                                "Status": "⚠️ Estouro" if a.get("status_prazo") == "estouro" else "✅ OK",
+                            }
+                            for a in _ainfo
+                        ]
+                        st.dataframe(pd.DataFrame(_atv_rows), use_container_width=True, hide_index=True)
+
+                    # ── Impacto por responsável ───────────────────────────────
+                    from collections import defaultdict as _ddict
+                    from datetime import timedelta as _td
+                    _imp = _ddict(lambda: {"horas": 0.0, "semanas": set()})
+                    for _a in _ainfo:
+                        _rsp = _a.get("responsavel", "")
+                        if not _rsp:
+                            continue
+                        _imp[_rsp]["horas"] += float(_a.get("horas_estimadas") or 0)
+                        _si = _a.get("semana_inicio")
+                        _sf = _a.get("semana_fim")
+                        if _si and _sf:
+                            _wd = _si
+                            while _wd <= _sf:
+                                _imp[_rsp]["semanas"].add(_wd)
+                                _wd += _td(weeks=1)
+
+                    _imp_rows = []
+                    for _rsp, _info in _imp.items():
+                        _cap_sem = capacidade.get(_rsp, 36)
+                        _n_sem   = max(len(_info["semanas"]), 1)
+                        _cap_per = _cap_sem * _n_sem
+                        _carga_atual = 0.0
+                        if df is not None and not df.empty and _info["semanas"]:
+                            import pandas as _pd2
+                            _datas = {_pd2.Timestamp(s) for s in _info["semanas"]}
+                            _mask  = (df["Responsável"] == _rsp) & (df["Semana"].isin(_datas))
+                            _carga_atual = float(df[_mask]["Horas"].sum())
+                        _livre  = max(0.0, _cap_per - _carga_atual)
+                        _novo   = _info["horas"]
+                        _status = "🟢 OK" if _carga_atual + _novo <= _cap_per else "🔴 Sobrecarga"
+                        _pct    = min(100, int((_carga_atual + _novo) / _cap_per * 100)) if _cap_per else 0
+                        _imp_rows.append({
+                            "Responsável":        _rsp,
+                            "Cap. disponível (h)": int(_livre),
+                            "Horas no projeto":   int(_novo),
+                            "Saldo após (h)":     int(_livre - _novo),
+                            "Uso no período":     f"{_pct}%",
+                            "Status":             _status,
+                        })
+
+                    if _imp_rows:
+                        st.markdown("**👤 Situação dos responsáveis no período do projeto:**")
+                        st.dataframe(pd.DataFrame(_imp_rows), use_container_width=True, hide_index=True)
+
+                    # ── Melhor período disponível por atividade ───────────────
+                    import datetime as _dt_bp
+                    _mon_fn = lambda _d_: _d_ - _dt_bp.timedelta(days=_d_.weekday())
+
+                    # Horas já usadas por (responsável, semana) no banco atual
+                    _used_rsp = {}
+                    if df is not None and not df.empty:
+                        for _, _ru in df.iterrows():
+                            _rk = _ru["Responsável"]
+                            _sw = _ru["Semana"]
+                            _sw = _mon_fn(_sw.date() if hasattr(_sw, "date") else _sw)
+                            _used_rsp.setdefault(_rk, {})
+                            _used_rsp[_rk][_sw] = _used_rsp[_rk].get(_sw, 0.0) + float(_ru["Horas"])
+
+                    # Semanas de férias por responsável
+                    _fer_set = {}
+                    for _kf, _vf in ferias.items():
+                        _fer_set[_kf] = set()
+                        for _fv in _vf:
+                            try:
+                                _fv_d = _fv.date() if hasattr(_fv, "date") else _fv
+                                _fer_set[_kf].add(_mon_fn(_fv_d))
+                            except Exception:
+                                pass
+
+                    # Nível sequencial por tipo — atividades do mesmo nível
+                    # só podem começar após o fim de TODAS do nível anterior.
+                    _TIPO_LVL = {
+                        "diagnostico": 1,
+                        "dados": 2,
+                        "predicoes": 3, "dashboard": 3,
+                        "implantacao": 4,
+                        "sustentacao": 5, "expansao": 5, "outros": 5,
+                    }
+                    _hoje_mon = _mon_fn(_dt_bp.date.today())
+
+                    # Data de vencimento do projeto (deadline)
+                    _vd_proj = None
+                    _vd_str  = _pinfo.get("data_vencimento", "")
+                    if _vd_str:
+                        try:
+                            _vd_proj = _dt_bp.datetime.strptime(_vd_str, "%Y-%m-%d").date()
+                        except Exception:
+                            pass
+
+                    # Horizonte de varredura: até vencimento + 8 semanas
+                    _scan_end = (
+                        (_vd_proj + _dt_bp.timedelta(weeks=8)) if _vd_proj
+                        else (_hoje_mon + _dt_bp.timedelta(weeks=78))
+                    )
+                    _all_weeks = []
+                    _dw = _hoje_mon
+                    while _dw <= _scan_end:
+                        _all_weeks.append(_dw)
+                        _dw += _dt_bp.timedelta(weeks=1)
+
+                    # Pré-computa horas livres/semana por pessoa
+                    _free_cap: dict = {}
+                    for _rsp_u in {_a.get("responsavel", "") for _a in _ainfo}:
+                        if not _rsp_u:
+                            continue
+                        _cap_u = float(capacidade.get(_rsp_u, 36))
+                        _ur_u  = _used_rsp.get(_rsp_u, {})
+                        _fr_u  = _fer_set.get(_rsp_u, set())
+                        _free_cap[_rsp_u] = {
+                            _w: (0.0 if _w in _fr_u else max(0.0, _cap_u - _ur_u.get(_w, 0.0)))
+                            for _w in _all_weeks
+                        }
+
+                    def _best_window(rsp, hh, earliest, deadline=None):
+                        """
+                        Retorna (si, sf) da janela que cobre 'hh' horas com menor span
+                        de calendário, começando em >= earliest.
+                        Penaliza janelas que terminam após o deadline (soft constraint).
+                        """
+                        fw    = _free_cap.get(rsp, {})
+                        weeks = [w for w in _all_weeks if w >= earliest]
+                        bsi = bsf = None
+                        bspan = 10 ** 9
+                        for _si_i, _si_w in enumerate(weeks):
+                            _acc = 0.0
+                            for _sf_w in weeks[_si_i:]:
+                                _acc += fw.get(_sf_w, 0.0)
+                                if _acc >= hh:
+                                    _span = (_sf_w - _si_w).days
+                                    # Penalidade suave: prefere janelas dentro do prazo
+                                    if deadline and _sf_w > deadline:
+                                        _span += 10000
+                                    if _span < bspan:
+                                        bspan = _span
+                                        bsi, bsf = _si_w, _sf_w
+                                    break
+                        return bsi, bsf
+
+                    # Ordena por nível de tipo, mantendo índice original
+                    _ainfo_order = sorted(
+                        range(len(_ainfo)),
+                        key=lambda _i_: _TIPO_LVL.get(_ainfo[_i_].get("tipo", "outros"), 5),
+                    )
+                    _lvl_fim: dict = {}  # {nivel: última semana_fim calculada}
+                    _ps_dict: dict = {}  # {orig_idx: entry}
+
+                    for _pi in _ainfo_order:
+                        _pa  = _ainfo[_pi]
+                        _rr  = _pa.get("responsavel", "")
+                        _hh  = float(_pa.get("horas_estimadas") or 40)
+                        _cap = float(capacidade.get(_rr, 36))
+                        if not _rr or _cap <= 0:
+                            continue
+                        _lvl = _TIPO_LVL.get(_pa.get("tipo", "outros"), 5)
+
+                        # Início mais cedo = máx dos fins de todos os níveis anteriores
+                        _pred_fim = max(
+                            (_lvl_fim[_l] for _l in _lvl_fim if _l < _lvl),
+                            default=None,
+                        )
+                        _earliest = (
+                            (_pred_fim + _dt_bp.timedelta(weeks=1))
+                            if _pred_fim else _hoje_mon
+                        )
+                        _earliest = max(_earliest, _hoje_mon)
+
+                        # Melhor janela: menor span que cobre _hh, respeitando deadline
+                        _si2, _sf2 = _best_window(_rr, _hh, _earliest, _vd_proj)
+
+                        # Atualiza fim máximo do nível
+                        if _sf2:
+                            _lvl_fim[_lvl] = max(_lvl_fim.get(_lvl, _sf2), _sf2)
+
+                        _orig_ini = _pa.get("semana_inicio")
+                        if _orig_ini is not None and hasattr(_orig_ini, "date"):
+                            _orig_ini = _orig_ini.date()
+                        _mesma = (_si2 == _orig_ini) if (_si2 and _orig_ini) else True
+                        _diff  = ""
+                        if not _mesma and _si2 and _orig_ini:
+                            _dd = (_si2 - _orig_ini).days
+                            _diff = f"({'+' if _dd > 0 else ''}{_dd}d vs atual)"
+                        _ps_dict[_pi] = {
+                            "_idx": _pi, "_ini": _si2, "_fim": _sf2,
+                            "_mesma": _mesma, "_diff": _diff,
+                            "atv":   _pa.get("nome", ""),
+                            "resp":  _rr,
+                            "atual": (
+                                f"{_orig_ini.strftime('%d/%m/%Y')} → "
+                                f"{_pa['semana_fim'].strftime('%d/%m/%Y')}"
+                            ) if _orig_ini and _pa.get("semana_fim") else "—",
+                            "melhor": (
+                                f"{_si2.strftime('%d/%m/%Y')} → {_sf2.strftime('%d/%m/%Y')}"
+                            ) if _si2 else "—",
+                        }
+
+                    # Exibe na ordem original do plano
+                    _ps_list = [_ps_dict[_i] for _i in range(len(_ainfo)) if _i in _ps_dict]
+
+                    if _ps_list:
+                        st.markdown("**📅 Melhor período disponível por atividade:**")
+                        _ph = st.columns([3, 2, 3, 3, 1])
+                        for _lbl, _col in zip(
+                            ["Atividade", "Responsável", "Período atual", "Melhor período", ""],
+                            _ph,
+                        ):
+                            _col.markdown(f"**{_lbl}**")
+                        _any_diff = False
+                        for _ps in _ps_list:
+                            _pc = st.columns([3, 2, 3, 3, 1])
+                            _pc[0].write(_ps["atv"])
+                            _pc[1].write(_ps["resp"])
+                            _pc[2].write(_ps["atual"])
+                            if _ps["_mesma"]:
+                                _pc[3].write(_ps["melhor"] + " ✅")
+                                _pc[4].write("")
+                            else:
+                                _any_diff = True
+                                _pc[3].write(f"{_ps['melhor']}  \n`{_ps['_diff']}`")
+                                if _ps["_ini"] and _pc[4].button(
+                                    "↺", key=f"swap_per_{_ps['_idx']}",
+                                    help="Aplicar melhor período para esta atividade",
+                                    use_container_width=True,
+                                ):
+                                    _np = {**st.session_state["agente_estado"]["plano_proposto"]}
+                                    _na = [dict(_x_) for _x_ in _np["atividades"]]
+                                    _na[_ps["_idx"]]["semana_inicio"] = _ps["_ini"]
+                                    _na[_ps["_idx"]]["semana_fim"]    = _ps["_fim"]
+                                    _vs = _np.get("projeto", {}).get("data_vencimento", "")
+                                    if _vs:
+                                        try:
+                                            _vd = _dt_bp.datetime.strptime(_vs, "%Y-%m-%d").date()
+                                            _na[_ps["_idx"]]["status_prazo"] = "ok" if _ps["_fim"] <= _vd else "estouro"
+                                            _na[_ps["_idx"]]["folga_dias"] = (_vd - _ps["_fim"]).days
+                                        except Exception:
+                                            pass
+                                    _np["atividades"] = _na
+                                    _ne = dict(st.session_state["agente_estado"])
+                                    _ne["plano_proposto"] = _np
+                                    st.session_state["agente_estado"] = _ne
+                                    st.rerun()
+
+                        if _any_diff:
+                            if st.button(
+                                "↺ Aplicar todos os melhores períodos",
+                                key="swap_all_periods",
+                                use_container_width=True,
+                            ):
+                                _np = {**st.session_state["agente_estado"]["plano_proposto"]}
+                                _na = [dict(_x_) for _x_ in _np["atividades"]]
+                                _vs = _np.get("projeto", {}).get("data_vencimento", "")
+                                _vd2 = None
+                                if _vs:
+                                    try:
+                                        _vd2 = _dt_bp.datetime.strptime(_vs, "%Y-%m-%d").date()
+                                    except Exception:
+                                        pass
+                                for _ps in _ps_list:
+                                    if not _ps["_mesma"] and _ps["_ini"]:
+                                        _na[_ps["_idx"]]["semana_inicio"] = _ps["_ini"]
+                                        _na[_ps["_idx"]]["semana_fim"]    = _ps["_fim"]
+                                        if _vd2:
+                                            _na[_ps["_idx"]]["status_prazo"] = "ok" if _ps["_fim"] <= _vd2 else "estouro"
+                                            _na[_ps["_idx"]]["folga_dias"] = (_vd2 - _ps["_fim"]).days
+                                _np["atividades"] = _na
+                                _ne = dict(st.session_state["agente_estado"])
+                                _ne["plano_proposto"] = _np
+                                st.session_state["agente_estado"] = _ne
+                                st.rerun()
+
+                _ap_c1, _ap_c2 = st.columns(2)
+                with _ap_c1:
+                    if st.button("✅ Aplicar plano", type="primary", key="agente_apply_btn", use_container_width=True):
+                        try:
+                            if _ag_plano.get("tipo") == "mudancas":
+                                _agente.aplicar_mudancas(_ag_plano["changes"])
+                            elif _ag_plano.get("tipo") == "criar_projeto":
+                                _agente.criar_projeto_com_atividades(
+                                    _ag_plano["projeto"],
+                                    _ag_plano["atividades"],
+                                    _ag_plano.get("ancora"),
+                                    capacidade,
+                                )
+                            st.session_state["agente_estado"] = _agente.estado_inicial()
+                            st.session_state.df = None
+                            st.success("✅ Plano aplicado com sucesso!")
+                            st.rerun()
+                        except Exception as _agae:
+                            st.error(f"Erro ao aplicar: {_agae}")
+                with _ap_c2:
+                    if st.button("✖ Cancelar plano", key="agente_cancel_btn", use_container_width=True):
+                        st.session_state["agente_estado"] = _agente.estado_inicial()
+                        st.rerun()
+
+        if st.session_state["agente_chat_history"]:
+            if st.button("🗑️ Limpar conversa", key="agente_chat_clear"):
+                st.session_state["agente_chat_history"] = []
+                st.session_state["agente_estado"] = _agente.estado_inicial()
+                st.rerun()
+
+    # ── Chat Livre ─────────────────────────────────────────────────────────────
+    with ia_tab2:
+        st.markdown("**Converse com a IA sobre o cronograma. Ela conhece todas as atividades, cargas e férias.**")
+
+        # Exibe histórico
+        for _msg in st.session_state.get("ia_chat_history", []):
+            with st.chat_message(_msg["role"]):
+                st.markdown(_msg["content"])
+
+        # Input do usuário
+        _user_input = st.chat_input(
+            "Ex: Quem tem mais capacidade livre essa semana? | Quais projetos têm atraso?",
+            key="ia_chat_input",
+        )
+        if _user_input:
+            _history = st.session_state.get("ia_chat_history", [])
+            with st.chat_message("user"):
+                st.markdown(_user_input)
+            with st.chat_message("assistant"):
+                with st.spinner("Pensando..."):
+                    try:
+                        _resp = _ai.chat_livre(_ia_ctx, _history, _user_input)
+                    except Exception as _ce:
+                        _resp = f"❌ Erro ao consultar IA: {_ce}"
+                st.markdown(_resp)
+            _history.append({"role": "user",      "content": _user_input})
+            _history.append({"role": "assistant",  "content": _resp})
+            st.session_state["ia_chat_history"] = _history
+            # Sem st.rerun() — evita tela branca; mensagens já renderizadas acima
+
+        if st.session_state.get("ia_chat_history"):
+            if st.button("🗑️ Limpar conversa", key="ia_chat_clear"):
+                st.session_state["ia_chat_history"] = []
+                st.rerun()

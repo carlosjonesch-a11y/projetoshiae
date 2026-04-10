@@ -44,9 +44,34 @@ def cursor():
         conn.close()
 
 
+def _to_monday(d):
+    """Normaliza uma date/Timestamp para a segunda-feira da sua semana ISO."""
+    from datetime import date as _date, datetime as _datetime
+    if isinstance(d, _datetime):
+        d = d.date()
+    if isinstance(d, _date):
+        return d - timedelta(days=d.weekday())
+    # fallback: string ou outro tipo — tenta via strptime
+    from datetime import date as _date2
+    import re as _re
+    if isinstance(d, str):
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+            try:
+                parsed = _datetime.strptime(d, fmt).date()
+                return parsed - timedelta(days=parsed.weekday())
+            except ValueError:
+                continue
+    raise TypeError(f"_to_monday: tipo não suportado {type(d)}")
+
+
 def _clear_cache():
-    """Limpa cache de leitura após qualquer escrita."""
+    """Limpa cache de leitura após qualquer escrita e sinaliza recarga."""
     st.cache_data.clear()
+    # Sinaliza ao app.py para recarregar df no próximo rerun
+    try:
+        st.session_state["_needs_reload"] = True
+    except Exception:
+        pass  # fora do contexto Streamlit (ex: testes)
 
 
 def init_tables():
@@ -100,6 +125,12 @@ def init_tables():
                     ALTER TABLE projetos ADD COLUMN subarea VARCHAR(100) DEFAULT '';
                     ALTER TABLE projetos ADD COLUMN tipo_projeto VARCHAR(100) DEFAULT '';
                 END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='projetos' AND column_name='data_vencimento'
+                ) THEN
+                    ALTER TABLE projetos ADD COLUMN data_vencimento DATE;
+                END IF;
             END $$;
         """)
         cur.execute("""
@@ -108,6 +139,16 @@ def init_tables():
                 responsavel  TEXT NOT NULL,
                 data_inicio  DATE NOT NULL,
                 data_fim     DATE NOT NULL
+            );
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS enc_undo_log (
+                id               SERIAL PRIMARY KEY,
+                criado_em        TIMESTAMPTZ DEFAULT NOW(),
+                atv_id           INTEGER NOT NULL,
+                semana_ini_antes DATE,
+                semana_fim_antes DATE,
+                nome             TEXT
             );
         """)
 
@@ -121,13 +162,13 @@ def listar_projetos():
         return [dict(r) for r in cur.fetchall()]
 
 
-def inserir_projeto(nome, descricao, status, unidade="", departamento="", subarea="", tipo_projeto=""):
+def inserir_projeto(nome, descricao, status, unidade="", departamento="", subarea="", tipo_projeto="", data_vencimento=None):
     with cursor() as cur:
         cur.execute(
-            """INSERT INTO projetos (nome, descricao, status, unidade, departamento, subarea, tipo_projeto)
-               VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+            """INSERT INTO projetos (nome, descricao, status, unidade, departamento, subarea, tipo_projeto, data_vencimento)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
             (nome.strip(), descricao.strip(), status,
-             unidade.strip(), departamento.strip(), subarea.strip(), tipo_projeto.strip()),
+             unidade.strip(), departamento.strip(), subarea.strip(), tipo_projeto.strip(), data_vencimento),
         )
         new_id = cur.fetchone()["id"]
     _clear_cache()
@@ -192,6 +233,8 @@ def listar_atividades(projeto_id=None):
 
 
 def inserir_atividade(projeto_id, nome, responsavel, horas, semana_inicio, semana_fim, ordem=0):
+    semana_inicio = _to_monday(semana_inicio)
+    semana_fim    = _to_monday(semana_fim)
     with cursor() as cur:
         cur.execute(
             """INSERT INTO atividades
@@ -232,14 +275,14 @@ def listar_atividades_por_pessoa_semana(responsavel: str, semana_date):
 # ── Atualiza nome em atualizar_projeto (cascata) ────────────────────────
 
 
-def atualizar_projeto(pid, nome, descricao, status, unidade="", departamento="", subarea="", tipo_projeto=""):
+def atualizar_projeto(pid, nome, descricao, status, unidade="", departamento="", subarea="", tipo_projeto="", data_vencimento=None):
     with cursor() as cur:
         cur.execute(
             """UPDATE projetos SET nome=%s, descricao=%s, status=%s,
-               unidade=%s, departamento=%s, subarea=%s, tipo_projeto=%s
+               unidade=%s, departamento=%s, subarea=%s, tipo_projeto=%s, data_vencimento=%s
                WHERE id=%s""",
             (nome.strip(), descricao.strip(), status,
-             unidade.strip(), departamento.strip(), subarea.strip(), tipo_projeto.strip(), pid),
+             unidade.strip(), departamento.strip(), subarea.strip(), tipo_projeto.strip(), data_vencimento, pid),
         )
     _clear_cache()
 
@@ -271,6 +314,8 @@ def atualizar_responsavel(rid, nome, email, capacidade):
 
 
 def atualizar_atividade(aid, nome, responsavel, horas, semana_inicio, semana_fim, ordem):
+    semana_inicio = _to_monday(semana_inicio)
+    semana_fim    = _to_monday(semana_fim)
     with cursor() as cur:
         cur.execute(
             """UPDATE atividades
@@ -352,8 +397,8 @@ def carregar_cronograma_do_banco():
 
     records = []
     for r in rows:
-        d = r["semana_inicio"]
-        fim = r["semana_fim"]
+        d   = _to_monday(r["semana_inicio"])
+        fim = _to_monday(r["semana_fim"])
         semanas_atv = []
         while d <= fim:
             semanas_atv.append(d)
@@ -383,6 +428,109 @@ def carregar_cronograma_do_banco():
     projetos = sorted(df["Projeto"].unique().tolist())
 
     return df, {}, semanas, pessoas, projetos
+
+
+
+# ── Classificador de tipo de atividade ───────────────────────────────────────
+
+# Ordem lógica: Diagnóstico → Dados → Predições → Dashboard → Implantação → Sustentação → Expansão
+TIPO_ATIVIDADE_ORDEM = {
+    "diagnostico":    1,
+    "dados":          2,
+    "predicoes":      3,
+    "dashboard":      4,
+    "implantacao":    5,
+    "sustentacao":    6,
+    "expansao":       7,
+    "outros":         9,
+}
+
+TIPO_ATIVIDADE_LABEL = {
+    "diagnostico": "📋 Diagnóstico/Entendimento",
+    "dados":       "🗄️ Dados/Estruturação",
+    "predicoes":   "🔮 Predições/ML",
+    "dashboard":   "📊 Dashboard",
+    "implantacao": "🚀 Implantação",
+    "sustentacao": "🔧 Sustentação/CCO",
+    "expansao":    "🌐 Expansão/Célula",
+    "outros":      "📌 Outros",
+}
+
+
+def classificar_tipo_atividade(nome: str) -> str:
+    """Classifica uma atividade pelo nome, retornando chave do TIPO_ATIVIDADE_ORDEM."""
+    import unicodedata
+
+    def norm(s):
+        return unicodedata.normalize("NFD", s.lower()).encode("ascii", "ignore").decode()
+
+    n = norm(nome)
+
+    # 4. Dashboard tem prioridade quando o nome começa com essa palavra
+    # (ex: "Dashboard - PS + Diagnóstico" é um dashboard, não um diagnóstico)
+    if n.startswith("dashboard") or n.startswith("construcao do dash") or n.startswith("criacao do dash"):
+        return "dashboard"
+
+    # Implantação explícita no início do nome tem prioridade (ex: "Implantação do modelo preditivo")
+    if n.startswith("implanta") or n.startswith("deploy") or n.startswith("go-live"):
+        return "implantacao"
+
+    # 1. Diagnóstico / Entendimento (primeira etapa sempre)
+    if any(w in n for w in [
+        "diagnost", "entendimento", "levantamento", "mapeamento",
+        "discovery", "kick-off", "kickoff", "kick off", "estudo de viabilidade",
+        "estudos ", "estudo e mapeam",
+    ]):
+        return "diagnostico"
+
+    # 2. Dados / Estruturação (base de dados antes de qualquer visualização)
+    if any(w in n for w in [
+        "estrutur", "tabela", "etl", "pipeline", "ingest", "modelagem",
+        "extracao", "extracao", "dwh", "data lake", "fonte de dado",
+        "carga de dado", "coleta", "validar de dado", "validacao de dado",
+        "construcao das tabelas", "tabela de demanda", "modelo de dado",
+    ]):
+        return "dados"
+
+    # 3. Predições / ML
+    if any(w in n for w in [
+        "predicao", "predicoes", "predi", "machine learn",
+        "ml ", " ia ", "algoritmo", "forecast", "previsao",
+        "construcao das predi", "modelo preditivo", "modelo ml",
+        "treinamento do modelo", "treinar modelo",
+    ]):
+        return "predicoes"
+
+    # 4. Dashboard / Visualização (restante dos casos)
+    if any(w in n for w in [
+        "dashboard", "painel", "relatorio", "visualizacao", "report",
+    ]):
+        return "dashboard"
+
+    # 7. Expansão / Célula — verificar ANTES de sustentação (CCO pode aparecer nos dois)
+    if any(w in n for w in [
+        "celula", "abrangencia", "replicacao", "expansao",
+        "construcao da celula",
+    ]):
+        return "expansao"
+
+    # 5. Implantação / Deploy
+    if any(w in n for w in [
+        "implantacao", "implantar", "deploy", "go-live", "golive",
+        "piloto",
+    ]):
+        return "implantacao"
+
+    # 6. Sustentação / CCO / Acompanhamento
+    if any(w in n for w in [
+        "sustentacao", "suporte", "manutencao", "cco", "acompanhamento",
+        "coach", "reuniao",
+    ]):
+        return "sustentacao"
+
+    return "outros"
+
+
 
 
 # ── Férias ─────────────────────────────────────────────────────────────────────

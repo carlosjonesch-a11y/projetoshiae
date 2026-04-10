@@ -66,14 +66,17 @@ def fig_heatmap_ocupacao(df: pd.DataFrame, ferias: dict, capacidade: dict, pesso
         texttemplate="%{text}",
         textfont={"size": 10},
         colorscale=[
-            # 0–90 % → verde pastel
-            [0.000, "#d4edda"],
+            # 0–60 % → branco
+            [0.000, "#ffffff"],
+            [0.300, "#ffffff"],
+            # 61–90 % → verde
+            [0.301, "#d4edda"],
             [0.450, "#d4edda"],
-            # 91–100 % → amarelo pastel
+            # 91–110 % → amarelo
             [0.451, "#fff3cd"],
-            [0.500, "#fff3cd"],
-            # 101 %+ → vermelho pastel → forte
-            [0.501, "#f8d7da"],
+            [0.550, "#fff3cd"],
+            # 111 %+ → vermelho
+            [0.551, "#f8d7da"],
             [1.000, "#c0392b"],
         ],
         zmin=0,
@@ -81,8 +84,8 @@ def fig_heatmap_ocupacao(df: pd.DataFrame, ferias: dict, capacidade: dict, pesso
         colorbar=dict(
             title="% Ocupação",
             ticksuffix="%",
-            tickvals=[0, 90, 100, 150, 200],
-            ticktext=["0%", "90%", "100%", "150%", "200%+"],
+            tickvals=[0, 60, 90, 110, 200],
+            ticktext=["0%", "60%", "90%", "110%", "200%+"],
         ),
         hoverongaps=False,
         hovertemplate=(
@@ -208,7 +211,7 @@ def fig_gantt(df: pd.DataFrame, projetos_filtro: list):
     # Número sequencial por projeto
     gantt_data["N"] = gantt_data.groupby("Projeto").cumcount() + 1
     gantt_data["Label"] = gantt_data.apply(
-        lambda r: f"{r['N']:02d}. {r['Atividade'][:50]}", axis=1
+        lambda r: f"{r['Projeto']} | {r['Atividade'][:50]}", axis=1
     )
 
     paleta = [
