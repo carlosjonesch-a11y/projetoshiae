@@ -12,11 +12,12 @@ import pandas as pd
 # ── Configuração ──────────────────────────────────────────────────────────────
 
 # Fila de fallback: tenta cada entrada em ordem até uma funcionar.
+# Modelos verificados em 10/04/2026 — apenas produção/preview ativos no Groq.
 # Formato: (provedor, modelo)
 _FALLBACK_CHAIN = [
-    ("groq",   "llama-3.3-70b-versatile"),
-    ("groq",   "llama3-70b-8192"),
-    ("groq",   "mixtral-8x7b-32768"),
+    ("groq",   "llama-3.3-70b-versatile"),   # produção — principal
+    ("groq",   "openai/gpt-oss-120b"),         # produção — fallback robusto
+    ("groq",   "llama-3.1-8b-instant"),        # produção — fallback leve
     ("gemini", "gemini-2.0-flash"),
     ("gemini", "gemini-1.5-flash"),
 ]
