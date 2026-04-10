@@ -1389,7 +1389,7 @@ with tab_ia:
 
     ia_tab1, ia_tab2 = st.tabs([
         "🤖 Agente de Cronograma",
-        "💬 Chat",
+        "� Analista de Projeto",
     ])
 
     # ── Agente de Cronograma ───────────────────────────────────────────────────

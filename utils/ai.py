@@ -15,7 +15,7 @@ import pandas as pd
 # Formato: (provedor, modelo)
 _FALLBACK_CHAIN = [
     ("groq",   "llama-3.3-70b-versatile"),
-    ("groq",   "llama-3.1-70b-versatile"),
+    ("groq",   "llama3-70b-8192"),
     ("groq",   "mixtral-8x7b-32768"),
     ("gemini", "gemini-2.0-flash"),
     ("gemini", "gemini-1.5-flash"),

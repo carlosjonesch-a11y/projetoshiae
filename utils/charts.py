@@ -189,7 +189,11 @@ def fig_gantt_projetos(df: pd.DataFrame, projetos_filtro: list):
         yaxis_title="",
         yaxis=dict(autorange="reversed", tickfont=dict(size=12)),
     )
-    fig.update_xaxes(showgrid=True, gridcolor="#e8edf3", tickformat="%d/%m", tickangle=-30)
+    fig.update_xaxes(
+        showgrid=True, gridcolor="#e8edf3", tickangle=-30,
+        dtick=7 * 24 * 60 * 60 * 1000,  # 1 semana em ms
+        tickformat="%d/%m\n%Y",
+    )
     return fig
 
 
@@ -257,7 +261,11 @@ def fig_gantt(df: pd.DataFrame, projetos_filtro: list):
         legend=dict(orientation="h", yanchor="top", y=-0.06, xanchor="right", x=1),
         yaxis=dict(autorange="reversed", tickfont=dict(size=11)),
     )
-    fig.update_xaxes(showgrid=True, gridcolor="#e8edf3", tickformat="%d/%m", tickangle=-30)
+    fig.update_xaxes(
+        showgrid=True, gridcolor="#e8edf3", tickangle=-30,
+        dtick=7 * 24 * 60 * 60 * 1000,  # 1 semana em ms
+        tickformat="%d/%m\n%Y",
+    )
     return fig
 
 
