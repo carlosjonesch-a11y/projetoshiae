@@ -101,10 +101,16 @@ def _call(messages: list) -> str:
                 return _call_groq(messages, model)
         except Exception as e:
             err_str = str(e)
-            # Só tenta próximo em rate-limit, modelo não encontrado ou sem chave
-            if any(k in err_str for k in ("rate_limit", "429", "not found",
-                                           "does not exist", "não configurada",
-                                           "not configured", "404")):
+            # Tenta próximo em: rate-limit, modelo não encontrado, sem chave,
+            # sobrecarga temporária (503/502/500), serviço indisponível
+            _RETRYABLE = (
+                "rate_limit", "429", "not found", "does not exist",
+                "não configurada", "not configured", "404",
+                "503", "502", "500", "unavailable", "UNAVAILABLE",
+                "high demand", "temporarily", "overloaded",
+                "resource_exhausted", "RESOURCE_EXHAUSTED",
+            )
+            if any(k in err_str for k in _RETRYABLE):
                 last_err = f"[{prov}/{model}] {err_str[:120]}"
                 continue
             # Outros erros (auth, etc.) — levanta imediatamente
